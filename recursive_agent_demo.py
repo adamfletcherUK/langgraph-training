@@ -3,15 +3,16 @@ Recursive Agent Pattern Demo using LangGraph
 
 This script demonstrates how to implement a recursive agent pattern where:
 1. A main agent breaks down complex tasks into subtasks
-2. Specialized agents handle specific subtasks
+2. Specialized agents handle specific subtasks in parallel
 3. Results are combined recursively
 4. Task dependencies are managed
 
 Key Concepts:
 - Task Decomposition
-- Recursive Execution
+- Parallel Execution
 - Result Aggregation
 - State Management
+- Rate Limiting
 """
 
 from typing import Annotated, Dict, List, TypedDict, Union, Literal
@@ -25,6 +26,9 @@ from dotenv import load_dotenv
 import json
 import logging
 from datetime import datetime
+import asyncio
+from asyncio import Semaphore
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -39,6 +43,13 @@ load_dotenv()
 
 # Initialize the LLM
 llm = ChatAnthropic(model="claude-3-sonnet-20240229")
+
+# Rate limiting configuration
+MAX_CONCURRENT_REQUESTS = 3  # Maximum number of concurrent API calls
+REQUEST_INTERVAL = 1.0  # Minimum time between requests in seconds
+
+# Create a semaphore for rate limiting
+semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # Define our state type
 
@@ -191,36 +202,60 @@ def decompose_task(state: TaskState) -> Dict:
     }
 
 
-def execute_subtask(state: TaskState) -> Dict:
+async def execute_subtask_with_rate_limit(task: str, messages: List[BaseMessage]) -> str:
     """
-    Executes a specific subtask.
+    Executes a subtask with rate limiting.
     """
-    current_task = state["subtasks"][0]
-    logger.info(f"⚙️  Executing subtask: {current_task[:100]}...")
+    async with semaphore:
+        # Add delay to respect rate limits
+        await asyncio.sleep(REQUEST_INTERVAL)
 
-    messages = state["messages"]
-    remaining_subtasks = state["subtasks"][1:]
-
-    response = llm.invoke(
-        specialist_prompt.format_messages(
-            messages=messages +
-            [HumanMessage(content=f"Execute this subtask: {current_task}")]
+        response = await llm.ainvoke(
+            specialist_prompt.format_messages(
+                messages=messages +
+                [HumanMessage(content=f"Execute this subtask: {task}")]
+            )
         )
-    )
+        return response.content
 
-    # Update results with the current task's result
+
+async def execute_subtasks_parallel(state: TaskState) -> Dict:
+    """
+    Executes multiple subtasks in parallel with rate limiting.
+    """
+    current_tasks = state["subtasks"]
+    logger.info(
+        f"⚙️  Starting parallel execution of {len(current_tasks)} subtasks")
+
+    # Create tasks for parallel execution
+    tasks = [
+        execute_subtask_with_rate_limit(task, state["messages"])
+        for task in current_tasks
+    ]
+
+    # Execute all tasks concurrently
+    results = await asyncio.gather(*tasks)
+
+    # Update results dictionary
     current_results = state["results"].copy()
-    current_results[current_task] = response.content
+    for task, result in zip(current_tasks, results):
+        current_results[task] = result
+        logger.info(f"✅ Completed subtask: {task[:100]}...")
 
-    logger.info(f"✅ Completed subtask: {current_task[:100]}...")
-    logger.info(f"📊 Remaining subtasks: {len(remaining_subtasks)}")
-
+    logger.info("✨ All subtasks completed")
     return {
-        "subtasks": remaining_subtasks,
+        "subtasks": [],  # All subtasks are completed
         "results": current_results,
-        "messages": messages + [response],
+        "messages": state["messages"],
         "final_result": None
     }
+
+
+def execute_subtask(state: TaskState) -> Dict:
+    """
+    Wrapper for async subtask execution.
+    """
+    return asyncio.run(execute_subtasks_parallel(state))
 
 
 def aggregate_results(state: TaskState) -> Dict:
