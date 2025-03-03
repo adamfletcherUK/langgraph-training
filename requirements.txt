@@ -1,0 +1,14 @@
+langsmith
+langchain_anthropic
+langchain_community
+langchain-huggingface
+ipykernel
+jupyter
+notebook
+python-dotenv
+tavily-python
+pydantic
+faiss-cpu
+sentence-transformers
+transformers
+torch
